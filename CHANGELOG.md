@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A number in a link's text is no longer read as a domain.** `domainsInText`
+  now takes a bare token only under a real (ICANN) public suffix; `tldts`
+  treats an unknown last label as a suffix, so `₹3.2`, `2.58` or `Mr.Smith`
+  came back as "domains" and an invoice whose amounts link to the biller
+  scored as three deceptive links. A written-out URL (`https://bank.example/`)
+  still names its host whatever the suffix.
+- **`sendclean.net` is a link wrapper.** Its click tracker
+  (`track.sendclean.net/c/`) wraps signature links, so "www.sarv.com" going
+  through it was charged as a link dressed as the reader's own domain.
+
 ## [0.4.1] - 2026-09-28
 
 ### Added

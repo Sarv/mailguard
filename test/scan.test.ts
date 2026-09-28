@@ -120,9 +120,9 @@ describe('scan', () => {
           'Subject: Document',
           'Content-Type: text/html; charset=utf-8',
         ],
-        '<a href="https://evil.example/x">reader.example portal</a>\r\n',
+        '<a href="https://evil.example/x">example.org portal</a>\r\n',
       );
-    const viaCc = await scan(lure('someone@other.example', 'me@reader.example'));
+    const viaCc = await scan(lure('someone@other.example', 'me@example.org'));
     expect(viaCc.reasons.find((r) => r.id === 'link-display-mismatch')?.points).toBe(4);
     const unrelated = await scan(lure('someone@other.example', 'x@third.example'));
     expect(unrelated.reasons.find((r) => r.id === 'link-display-mismatch')?.points).toBe(2);

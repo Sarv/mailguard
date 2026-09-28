@@ -51,6 +51,7 @@ export const LINK_WRAPPER_DOMAINS: ReadonlySet<string> = new Set<string>([
   'rs6.net',
   'safelinks.protection.outlook.com',
   'salesforce.com',
+  'sendclean.net',
   'sendgrid.net',
   'sendible.com',
   'sparkpostmail.com',

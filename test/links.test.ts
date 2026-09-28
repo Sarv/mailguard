@@ -31,6 +31,25 @@ describe('linkMismatches', () => {
   // Regression: legitimate marketing wraps every link through an ESP. If
   // those count, the warning fires on most newsletters and stops meaning
   // anything.
+  // Regression: an invoice whose amounts link to the biller was scored as three
+  // deceptive links ("appears to go to ₹3.2 actually points to cii.in").
+  it('does not read a number in the link text as a domain', () => {
+    expect(linkMismatches(anchor('₹3.2', 'https://cii.in/invoice/1'))).toEqual([]);
+    expect(linkMismatches(anchor('2.58', 'https://cii.in/invoice/1'))).toEqual([]);
+    expect(linkMismatches(anchor('136.25', 'https://cii.in/invoice/1'))).toEqual([]);
+  });
+
+  // Regression: a sarv.com signature whose "www.sarv.com" link is click-tracked
+  // through track.sendclean.net was charged 4 as "a link dressed as your own
+  // domain" — on the org's own authenticated mail.
+  it('treats the SendClean click tracker as a wrapper', () => {
+    expect(
+      linkMismatches(
+        anchor('www.sarv.com', 'https://track.sendclean.net/c/?u=iuuqt%3B00tbsw%2Fdpn0'),
+      ),
+    ).toEqual([]);
+  });
+
   it('skips wrapper and tracker domains on either side', () => {
     expect(linkMismatches(anchor('paypal.com', 'https://sendgrid.net/ls/click?u=1'))).toEqual([]);
     expect(linkMismatches(anchor('bit.ly/xyz', 'https://example-shop.com/x'))).toEqual([]);

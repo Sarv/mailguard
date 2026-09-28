@@ -77,6 +77,15 @@ export function domainOfAddress(address: string | null | undefined): string | nu
   return registrableDomain(address.slice(at + 1));
 }
 
+/** The hostname of a written-out URL, or null when it does not parse. */
+function hostOfUrl(url: string): string | null {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Registrable domains referenced inside a free-text display name.
  *
@@ -84,7 +93,8 @@ export function domainOfAddress(address: string | null | undefined): string | nu
  * tries to recognise a domain itself. A token like `Advik` yields null and is
  * ignored; `paypal.com` or `security@paypal.com` yields `paypal.com`. The
  * dot requirement stops `tldts` resolving a bare word against its no-dot
- * fallbacks and inventing a brand out of somebody's surname.
+ * fallbacks and inventing a brand out of somebody's surname, and the
+ * public-suffix requirement stops a number (`₹3.2`, `2.58`) passing as one.
  */
 export function domainsInText(text: string | null | undefined): string[] {
   if (!text) return [];
@@ -92,11 +102,24 @@ export function domainsInText(text: string | null | undefined): string[] {
   for (const rawToken of text.split(/[\s<>(),;:"'|]+/)) {
     const token = rawToken.trim();
     if (!token) continue;
+    // A written-out URL (its scheme split off at the `:`) claims its host
+    // outright, whatever the suffix.
+    if (token.startsWith('//')) {
+      const domain = registrableDomain(hostOfUrl(`https:${token}`));
+      if (domain) found.add(domain);
+      continue;
+    }
     // If the token is (or contains) an email address, keep the host side.
     const candidate = token.includes('@') ? token.slice(token.lastIndexOf('@') + 1) : token;
     if (!candidate.includes('.')) continue;
-    const domain = registrableDomain(candidate);
-    if (domain) found.add(domain);
+    // A bare token only under a real public suffix. For an unknown one
+    // `tldts` falls back to treating the last label as the suffix, so a price
+    // (`₹3.2`, `136.25`), a version (`2.58`) or `Mr.Smith` came back as a
+    // "domain" — and an invoice whose amounts link to the biller read as a
+    // link lying about where it goes.
+    const parsed = parseHost(candidate.toLowerCase(), { allowPrivateDomains: false });
+    if (parsed.isIcann !== true || !parsed.domain) continue;
+    found.add(parsed.domain);
   }
   return [...found];
 }

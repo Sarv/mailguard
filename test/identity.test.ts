@@ -60,6 +60,30 @@ describe('domainsInText', () => {
     expect(domainsInText('')).toEqual([]);
     expect(domainsInText(null)).toEqual([]);
   });
+  // Regression: an invoice whose amounts are links to the biller was flagged as
+  // "a link that appears to go to ₹3.2 actually points to cii.in" — tldts reads
+  // an unknown last label as a suffix, so every decimal number was a "domain".
+  it('ignores numbers — a price, a version or an amount is not a domain', () => {
+    expect(domainsInText('₹3.2')).toEqual([]);
+    expect(domainsInText('2.58')).toEqual([]);
+    expect(domainsInText('Total 136.25 (incl. 18.00 GST) v1.2.3')).toEqual([]);
+    expect(domainsInText('1.2.3.4')).toEqual([]);
+  });
+  // A made-up suffix is not a domain either, but a real one next to a number is.
+  it('keeps only names under a real public suffix', () => {
+    expect(domainsInText('foo.notatld')).toEqual([]);
+    expect(domainsInText('Pay ₹3.2 at cii.in')).toEqual(['cii.in']);
+    expect(domainsInText('user.github.io')).toEqual(['github.io']);
+    expect(domainsInText('Dear Mr.Smith')).toEqual([]);
+  });
+  // A written-out URL is a claim about its host whatever the suffix — the
+  // lure "https://bank.example/login" must still be read as naming bank.example.
+  it('takes the host of a written-out URL even under an unlisted suffix', () => {
+    expect(domainsInText('https://bank.example/login')).toEqual(['bank.example']);
+    expect(domainsInText('see http://Portal.Acme.example.')).toEqual(['acme.example']);
+    expect(domainsInText('https:// nothing')).toEqual([]);
+    expect(domainsInText('https://[bad')).toEqual([]);
+  });
 });
 
 describe('assessSender', () => {
