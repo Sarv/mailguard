@@ -4,5 +4,5 @@ export const hsbc = {
   id: 'hsbc',
   name: 'HSBC',
   phrases: ['hsbc'],
-  domains: ['hsbc.co.in', 'hsbc.co.uk', 'hsbc.com', 'hsbc.com.hk'],
+  domains: ['hsbc.bank.in', 'hsbc.co.in', 'hsbc.co.uk', 'hsbc.com', 'hsbc.com.hk'],
 } satisfies ProtectedBrand;

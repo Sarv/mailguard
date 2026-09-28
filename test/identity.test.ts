@@ -122,6 +122,42 @@ describe('assessSender', () => {
     expect(assessSender('Wells Fargo Online', 'alerts@wellsfargoemail.com')).toEqual([]);
   });
 
+  // Regression, from a live mailbox 2026-09-27: Indian banks moved to the
+  // RBI-mandated `.bank.in` namespace, and `bank.in` is a public suffix, so
+  // `axis.bank.in` has the label `axis` — which carries no `axisbank`. The
+  // genuine AutoPay notice from it was painted red and filed as spam. Every
+  // listed Indian bank's live `.bank.in` sending domain is its own.
+  it('does NOT flag Indian banks writing from their .bank.in domains', () => {
+    expect(assessSender('Axis Bank Alerts', 'alerts@axis.bank.in')).toEqual([]);
+    expect(assessSender('HDFC Bank', 'alerts@hdfc.bank.in')).toEqual([]);
+    expect(assessSender('HDFC Bank InstaAlerts', 'alerts@hdfcbank.bank.in')).toEqual([]);
+    expect(assessSender('ICICI Bank', 'alerts@icici.bank.in')).toEqual([]);
+    expect(assessSender('Kotak Mahindra Bank', 'alerts@kotak.bank.in')).toEqual([]);
+    expect(assessSender('State Bank of India', 'donotreply@sbi.bank.in')).toEqual([]);
+    expect(assessSender('HSBC India', 'alerts@hsbc.bank.in')).toEqual([]);
+  });
+
+  // Regression: a `.bank.in` entry must not hand its short label to the
+  // name-carrying exemption. `axis` is Axis Bank's only inside the verified
+  // registry; outside it, `axis-login.example` writing as Axis Bank is
+  // precisely the stranger this rule exists to catch.
+  it('does not let a .bank.in label forgive a lookalike outside that registry', () => {
+    const axis = PROTECTED_BRANDS.find((brand) => brand.id === 'axis-bank')!;
+    expect(domainCarriesBrandName(axis, 'axis-login.example')).toBe(false);
+    expect(assessSender('Axis Bank', 'kyc@axis-login.example')[0]?.kind).toBe('brand');
+    expect(assessSender('HDFC Bank', 'kyc@hdfc-verify.example')[0]?.kind).toBe('brand');
+    // A brand whose only entry sits under the `.bank` TLD is held the same way.
+    const onlyDotBank = {
+      id: 'x',
+      name: 'Example Bank',
+      phrases: ['example bank'],
+      domains: ['examplebank.bank'],
+    };
+    expect(domainCarriesBrandName(onlyDotBank, 'examplebank-login.example')).toBe(false);
+    // ...while the long, name-carrying label from its ordinary domain still counts.
+    expect(domainCarriesBrandName(axis, 'axisbankmail.bank.in')).toBe(true);
+  });
+
   // KNOWN LIMITATION, stated so nobody mistakes it for an accident: the
   // lookalike domain carries the brand's name too, so this rule leaves it
   // alone. Catching `paypal-secure.example` is a different tell — a domain

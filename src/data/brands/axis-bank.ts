@@ -4,5 +4,5 @@ export const axisBank = {
   id: 'axis-bank',
   name: 'Axis Bank',
   phrases: ['axis bank'],
-  domains: ['axisbank.com'],
+  domains: ['axis.bank.in', 'axisbank.com'],
 } satisfies ProtectedBrand;

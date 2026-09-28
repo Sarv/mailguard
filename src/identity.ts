@@ -173,6 +173,15 @@ export function brandsNamedIn(
 const BRAND_LABEL_MIN_CHARS = 3;
 
 /**
+ * Public suffixes whose registry admits only verified institutions: `bank.in`
+ * is issued by IDRBT to RBI-licensed banks alone, and the `.bank` TLD by fTLD
+ * to verified banks alone. A brand's domain under one of these proves the
+ * list entry, but its short label (`axis`, `sbi`) is not the brand's name
+ * anywhere else — see {@link domainCarriesBrandName}.
+ */
+const REGISTRANT_VERIFIED_SUFFIXES: readonly string[] = ['bank', 'bank.in'];
+
+/**
  * True when the sender's registrable domain carries the brand's own name —
  * `axisbankmail.bank.in` for Axis Bank, `wellsfargoemail.com` for Wells Fargo.
  *
@@ -195,6 +204,13 @@ const BRAND_LABEL_MIN_CHARS = 3;
  * The labels are taken from the brand's own domains (`axisbank` from
  * `axisbank.com`), not from its phrases, so a brand named by a phrase like
  * "state bank of india" is matched on the label it actually registers.
+ *
+ * Except the domains under a {@link REGISTRANT_VERIFIED_SUFFIXES} namespace.
+ * `axis.bank.in` is Axis Bank's because only a licensed bank can hold a name
+ * under `bank.in` — the label `axis` says so only INSIDE that registry. Keyed
+ * on here it would forgive `axis-login.example` for Axis Bank, which is the
+ * lookalike this exemption must not widen to. Such a domain is matched by the
+ * list itself ({@link brandOwningDomain}), never by its label.
  */
 export function domainCarriesBrandName(
   brand: ProtectedBrand,
@@ -203,7 +219,11 @@ export function domainCarriesBrandName(
   const label = parseHost((senderDomain ?? '').toLowerCase()).domainWithoutSuffix;
   if (!label) return false;
   return brand.domains.some((domain) => {
-    const own = parseHost(domain).domainWithoutSuffix;
+    const parsed = parseHost(domain);
+    if (parsed.publicSuffix && REGISTRANT_VERIFIED_SUFFIXES.includes(parsed.publicSuffix)) {
+      return false;
+    }
+    const own = parsed.domainWithoutSuffix;
     return !!own && own.length >= BRAND_LABEL_MIN_CHARS && label.includes(own);
   });
 }

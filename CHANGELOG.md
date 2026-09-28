@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Indian banks writing from their `.bank.in` domains were flagged as
+  impersonating themselves.** The RBI moved Indian banks to `.bank.in`, which is
+  a public suffix, so Axis Bank's `axis.bank.in` has the registrable label
+  `axis` — which carries no `axisbank` — and a genuine AutoPay notice scored
+  `brand-impersonation` and was filed as spam. Axis Bank, SBI, HDFC Bank
+  (`hdfc.bank.in`, `hdfcbank.bank.in`), ICICI Bank, Kotak and HSBC now list
+  their live `.bank.in` sending domains, each audited as registered through
+  IDRBT with SPF and DMARC `p=reject`. A domain under a registrant-verified
+  suffix (`bank.in`, `.bank`) is matched by the list only, never by its short
+  label, so `axis-login.example` writing as Axis Bank is still caught.
+
 ## [0.4.0] - 2026-09-24
 
 ### Added
