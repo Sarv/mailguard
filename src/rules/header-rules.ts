@@ -31,6 +31,7 @@ import { assessSender, domainOfAddress, type ProtectedBrand } from '../identity.
 import { hasReplyPrefix, isValidMessageId } from '../rfc.js';
 import {
   assessmentOf,
+  authenticationFailed,
   type AuthStatus,
   type SpamAssessment,
   type SpamReason,
@@ -139,20 +140,17 @@ export function assessSpamSignals(input: SpamSignalInput): SpamAssessment {
   // 3. Authentication. DMARC is the authoritative verdict; SPF and DKIM are its
   //    inputs and either can fail benignly (a forwarder, a list). Only when the
   //    server recorded no DMARC verdict do both inputs failing stand in for it.
-  //    The same rule the security level applies, so a red shield and the
-  //    filter's points always agree.
+  //    The same rule the security level applies — `authenticationFailed` is
+  //    shared — so a red shield and the filter's points always agree.
   const auth = input.auth;
-  if (auth) {
-    const dmarcKnown = auth.dmarc === 'pass' || auth.dmarc === 'fail';
-    if (auth.dmarc === 'fail') {
-      add('auth-failed', 3, 'DMARC failed — the sender’s domain did not authenticate this message');
-    } else if (!dmarcKnown && auth.spf === 'fail' && auth.dkim === 'fail') {
-      add(
-        'auth-failed',
-        3,
-        'SPF and DKIM both failed — the sending server is not authorised for this domain',
-      );
-    }
+  if (auth && authenticationFailed(auth)) {
+    add(
+      'auth-failed',
+      3,
+      auth.dmarc === 'fail'
+        ? 'DMARC failed — the sender’s domain did not authenticate this message'
+        : 'SPF and DKIM both failed — the sending server is not authorised for this domain',
+    );
   }
 
   // 4. Identity. Three checks, three ids, one call: the shield and the

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   assessmentOf,
+  authenticationFailed,
   canonicalReasonId,
   isSpamScore,
   mergeAssessments,
@@ -28,6 +29,37 @@ import {
  * one outcome worse than either verdict on its own — the user is told the
  * mail is fine and never sees it again.
  */
+// The one rule the scorer, the shield and sender trust share. If it drifts,
+// a trusted address that failed DMARC — a forgery of it — sails through, or a
+// forwarded message with a broken DKIM under a passing DMARC turns red.
+describe('authenticationFailed', () => {
+  const status = (over: Partial<AuthStatus>): AuthStatus => ({
+    spf: 'pass',
+    dkim: 'pass',
+    dmarc: 'pass',
+    overall: 'pass',
+    ...over,
+  });
+
+  it('is DMARC failing, whatever SPF and DKIM said', () => {
+    expect(authenticationFailed(status({ dmarc: 'fail' }))).toBe(true);
+    expect(authenticationFailed(status({ dmarc: 'pass', spf: 'fail', dkim: 'fail' }))).toBe(false);
+  });
+
+  it('falls back to SPF and DKIM both failing only when DMARC gave no verdict', () => {
+    expect(authenticationFailed(status({ dmarc: 'none', spf: 'fail', dkim: 'fail' }))).toBe(true);
+    expect(authenticationFailed(status({ dmarc: 'unknown', spf: 'fail', dkim: 'pass' }))).toBe(
+      false,
+    );
+  });
+
+  it('is not a failure when nothing was asserted', () => {
+    expect(authenticationFailed(null)).toBe(false);
+    expect(authenticationFailed(undefined)).toBe(false);
+    expect(authenticationFailed(unknownAuthStatus())).toBe(false);
+  });
+});
+
 describe('spamVerdict', () => {
   // Boundaries are inclusive on purpose. A message scoring exactly the
   // threshold IS spam; an off-by-one here silently widens the inbox by one

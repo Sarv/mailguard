@@ -38,6 +38,7 @@ import {
   type OffDomainLink,
 } from './links.js';
 import {
+  authenticationFailed,
   parseSpamReasons,
   spamVerdict,
   type AuthStatus,
@@ -118,6 +119,13 @@ export interface SecurityAssessment {
   senderDomain: string | null;
   /** The spam verdict; `verdict` is null when the message was never scored. */
   spam: { verdict: SpamVerdict | null; score: number | null; reasons: SpamReason[] };
+  /**
+   * The reader's trust in this sender was APPLIED: they vouched for the
+   * address ({@link SecurityInput.trustedSender}) and the message
+   * authenticated. False when they did not, and false when they did but the
+   * message failed authentication — trust is then set aside, not honoured.
+   */
+  trusted: boolean;
 }
 
 /**
@@ -255,6 +263,20 @@ export interface SecurityInput {
    * shield and the score will disagree about the same name.
    */
   brands?: readonly ProtectedBrand[];
+  /**
+   * The reader has vouched for this exact sender address ("Trust this
+   * sender"). When the message authenticated, the sender-name check and the
+   * spam score stop counting against it: the reader knows who this is, and a
+   * bank alert they trust must not keep arriving under a red shield. Links,
+   * blocked links and authentication are still judged — trust in a sender is
+   * not trust in every URL their mail carries.
+   *
+   * Set aside when authentication FAILED ({@link authenticationFailed}): the
+   * From address is exactly what a forger copies, so a trusted address that
+   * did not authenticate is the likeliest forgery of all, and the sender check
+   * says so.
+   */
+  trustedSender?: boolean;
 }
 
 /** Decide the level for one message. */
@@ -262,6 +284,8 @@ export function assessEmailSecurity(input: SecurityInput): SecurityAssessment {
   const rules = input.rules ?? EMPTY_RULES;
   const senderDomain = registrableDomain(input.fromAddress?.split('@')[1] ?? null);
   const auth = typeof input.auth === 'string' ? parseAuthStatus(input.auth) : (input.auth ?? null);
+  const authFailed = authenticationFailed(auth);
+  const trusted = input.trustedSender === true && !authFailed;
 
   const dkimCheck = authCheck(
     'dkim',
@@ -301,19 +325,34 @@ export function assessEmailSecurity(input: SecurityInput): SecurityAssessment {
   // Display-name impersonation.
   const spoof = assessSender(input.fromName, input.fromAddress, input.brands);
   checks.push(
-    spoof.length
+    input.trustedSender === true && authFailed
       ? {
           id: 'sender',
           label: 'Sender name',
           status: 'fail',
-          detail: (spoof[0] as { text: string }).text,
+          detail:
+            'You trust this address, but this message failed authentication — it may be a forgery of it',
         }
-      : {
-          id: 'sender',
-          label: 'Sender name',
-          status: 'pass',
-          detail: 'The display name does not impersonate another domain',
-        },
+      : trusted
+        ? {
+            id: 'sender',
+            label: 'Sender name',
+            status: 'pass',
+            detail: 'You trust this sender, and this message authenticated',
+          }
+        : spoof.length
+          ? {
+              id: 'sender',
+              label: 'Sender name',
+              status: 'fail',
+              detail: (spoof[0] as { text: string }).text,
+            }
+          : {
+              id: 'sender',
+              label: 'Sender name',
+              status: 'pass',
+              detail: 'The display name does not impersonate another domain',
+            },
   );
 
   // Deceptive links, minus the pairs the user has vetted. A body the caller
@@ -388,7 +427,16 @@ export function assessEmailSecurity(input: SecurityInput): SecurityAssessment {
       : [...(input.spamReasons ?? [])];
   const spam = { verdict, score: spamScore, reasons: spamReasons };
   const spamSummary = spamReasons.map((r) => r.detail).join('; ');
-  if (verdict === 'spam') {
+  if (trusted && (verdict === 'spam' || verdict === 'suspicious')) {
+    // Shown, not hidden: the reader should still be able to see what the
+    // filter found, only not have it held against a sender they vouched for.
+    checks.push({
+      id: 'spam',
+      label: 'Spam filter',
+      status: 'pass',
+      detail: `Scored ${spamScore}, set aside because you trust this sender — ${spamSummary}`,
+    });
+  } else if (verdict === 'spam') {
     checks.push({
       id: 'spam',
       label: 'Spam filter',
@@ -438,6 +486,7 @@ export function assessEmailSecurity(input: SecurityInput): SecurityAssessment {
     blockedLinks,
     senderDomain,
     spam,
+    trusted,
   });
 
   // ---- the level ---------------------------------------------------------
@@ -451,10 +500,13 @@ export function assessEmailSecurity(input: SecurityInput): SecurityAssessment {
   // passes, and treating ANY component failure as failure turned those into
   // red shields on legitimate bank and travel mail. Only when the server
   // recorded no DMARC verdict at all do we fall back to "both inputs failed".
+  //
+  // A sender the reader trusts is not impersonating anybody to them: the name
+  // check stops counting once the message authenticated (see `trusted`).
   const dmarcKnown = auth?.dmarc === 'pass' || auth?.dmarc === 'fail';
-  const authFailed =
-    auth?.dmarc === 'fail' || (!dmarcKnown && auth?.spf === 'fail' && auth?.dkim === 'fail');
-  if (authFailed || spoof.length > 0 || blockedLinks.length > 0) return result('danger');
+  if (authFailed || (spoof.length > 0 && !trusted) || blockedLinks.length > 0) {
+    return result('danger');
+  }
 
   // Soft signals: an unvetted deceptive link, a policy that declined to vouch,
   // a single failed input with no DMARC verdict to settle the question — or
@@ -465,7 +517,9 @@ export function assessEmailSecurity(input: SecurityInput): SecurityAssessment {
     auth?.spf === 'softfail' ||
     auth?.spf === 'neutral' ||
     (!dmarcKnown && (auth?.spf === 'fail' || auth?.dkim === 'fail'));
-  if (untrustedLinks.length > 0 || softAuth || verdict === 'spam') return result('caution');
+  if (untrustedLinks.length > 0 || softAuth || (verdict === 'spam' && !trusted)) {
+    return result('caution');
+  }
 
   // Clean. Now: how STRONGLY do we know who sent it? DMARC pass settles it;
   // without a DMARC verdict, SPF and DKIM both passing is the next best thing.

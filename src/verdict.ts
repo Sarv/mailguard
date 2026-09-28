@@ -275,6 +275,24 @@ export function rollUpAuthStatus(components: Omit<AuthStatus, 'overall'>): AuthS
 }
 
 /**
+ * Did the sender's domain actively FAIL to authenticate this message?
+ *
+ * DMARC is the authoritative verdict; SPF and DKIM are its inputs and either
+ * can fail benignly (a forwarder, a list). Only when no DMARC verdict was
+ * recorded do both inputs failing stand in for it. `none`, `unknown` and an
+ * absent status are NOT failures — nothing was asserted either way.
+ *
+ * The one copy of this rule: the scorer charges `auth-failed` on it, the
+ * shield turns red on it, and a reader's trust in a sender is set aside on it
+ * — a trusted address that did not authenticate may be a forgery of it.
+ */
+export function authenticationFailed(auth: AuthStatus | null | undefined): boolean {
+  if (!auth) return false;
+  const dmarcKnown = auth.dmarc === 'pass' || auth.dmarc === 'fail';
+  return auth.dmarc === 'fail' || (!dmarcKnown && auth.spf === 'fail' && auth.dkim === 'fail');
+}
+
+/**
  * What one stage of the scanner concluded: the points it charged, and why.
  *
  * It lives HERE, with the thresholds, rather than beside the header rules that

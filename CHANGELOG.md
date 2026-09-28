@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`authenticationFailed(auth)`** (`/verdict`, zero imports) — the one rule for
+  "the sender's domain actively failed to authenticate": DMARC `fail`, or SPF
+  and DKIM both failing when DMARC gave no verdict. The scorer's `auth-failed`
+  and the shield's `danger` both read it now, instead of two copies.
+- **Trust in a sender** — `SecurityInput.trustedSender`. The reader has
+  vouched for this exact address; when the message authenticated, the sender
+  name check and the spam score stop counting against it (both still shown,
+  as passes, with the score and its reasons). Links and blocked links are
+  still judged. Set aside when authentication FAILED — a forged copy of a
+  trusted address is the likeliest forgery of all — and the sender check says
+  so. `SecurityAssessment.trusted` reports whether the trust was applied.
+
 ### Changed
 
 - **`in-reply-to-self` weighs 1 on its own and 2 only beside a sender-identity

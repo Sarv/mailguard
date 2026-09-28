@@ -172,6 +172,7 @@ export {
   canonicalReasonId,
   isSpamScore,
   mergeAssessments,
+  authenticationFailed,
   parseSpamReasons,
   rollUpAuthStatus,
   spamVerdict,

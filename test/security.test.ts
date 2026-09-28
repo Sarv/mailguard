@@ -12,7 +12,7 @@ import {
   type SecurityCheck,
   type SecurityLevel,
 } from '../src/security.js';
-import type { AuthStatus } from '../src/verdict.js';
+import type { AuthStatus, SpamReason } from '../src/verdict.js';
 
 const auth = (over: Partial<AuthStatus> = {}): AuthStatus => ({
   spf: 'pass',
@@ -648,6 +648,101 @@ describe('assessEmailSecurity — a body that has not arrived yet', () => {
   it('moves once the body arrives', () => {
     expect(levelOf({ auth: auth(), html: spoofedLink, bodyLoaded: false })).toBe('authenticated');
     expect(levelOf({ auth: auth(), html: spoofedLink })).toBe('caution');
+  });
+});
+
+describe('assessEmailSecurity — a sender the reader trusts', () => {
+  // The Axis Bank alert that started this: a bank's name on an address the
+  // brand list did not know, plus a spam score. Trusted and authenticated, it
+  // must not arrive under a red shield again.
+  const BANK = { fromName: 'Axis Bank Alerts', fromAddress: 'alerts@unlisted-bank.example' };
+  const SPAM: SpamReason[] = [
+    { id: 'brand-impersonation', points: 3, detail: 'borrows the Axis Bank name' },
+    { id: 'in-reply-to-self', points: 2, detail: 'reply to itself' },
+  ];
+
+  // Regression: if trust stops lifting the name and score checks, the
+  // reader's "Trust this sender" visibly does nothing.
+  it('sets the name check and the spam score aside when the message authenticated', () => {
+    const untrusted = assessEmailSecurity({
+      ...BANK,
+      auth: auth(),
+      spamScore: 5,
+      spamReasons: SPAM,
+    });
+    expect(untrusted.level).toBe('danger');
+    const trusted = assessEmailSecurity({
+      ...BANK,
+      auth: auth(),
+      spamScore: 5,
+      spamReasons: SPAM,
+      trustedSender: true,
+    });
+    expect(trusted.trusted).toBe(true);
+    expect(trusted.level).toBe('verified');
+    expect(trusted.checks.find((c) => c.id === 'sender')?.status).toBe('pass');
+    const spam = trusted.checks.find((c) => c.id === 'spam');
+    expect(spam?.status).toBe('pass');
+    // Still shown, so the reader can see what the filter found.
+    expect(spam?.detail).toContain('set aside because you trust this sender');
+    expect(spam?.detail).toContain('borrows the Axis Bank name');
+  });
+
+  // Regression, the security edge: the From address is what a forger copies.
+  // A trusted address on a message that FAILED authentication must stay
+  // danger and say why — otherwise trust is a bypass for anyone who can type
+  // the address.
+  it('sets trust aside, and says so, when the message failed authentication', () => {
+    const forged = assessEmailSecurity({
+      ...BANK,
+      auth: auth({ dmarc: 'fail', overall: 'fail' }),
+      spamScore: 8,
+      spamReasons: SPAM,
+      trustedSender: true,
+    });
+    expect(forged.trusted).toBe(false);
+    expect(forged.level).toBe('danger');
+    const sender = forged.checks.find((c) => c.id === 'sender');
+    expect(sender?.status).toBe('fail');
+    expect(sender?.detail).toContain('may be a forgery');
+    expect(forged.checks.find((c) => c.id === 'spam')?.status).toBe('fail');
+  });
+
+  // Trust is in the SENDER, not in every URL their mail carries: a link that
+  // lies about where it goes, or one the reader blocked, still counts.
+  it('still judges links', () => {
+    const html = anchor('https://unlisted-bank.example', 'https://evil.example/x');
+    expect(assessEmailSecurity({ ...BANK, auth: auth(), html, trustedSender: true }).level).toBe(
+      'caution',
+    );
+    const blocked = rules(
+      [],
+      [linkRuleKey('unlisted-bank.example', 'unlisted-bank.example', 'evil.example')],
+    );
+    expect(
+      assessEmailSecurity({ ...BANK, auth: auth(), html, rules: blocked, trustedSender: true })
+        .level,
+    ).toBe('danger');
+  });
+
+  it('changes nothing when the reader has not trusted the sender', () => {
+    const plain = assessEmailSecurity({ ...SENDER, auth: auth() });
+    expect(plain.trusted).toBe(false);
+    expect(assessEmailSecurity({ ...SENDER, auth: auth(), trustedSender: false })).toEqual(plain);
+  });
+
+  // With no authentication verdict at all there is nothing to contradict the
+  // address, so trust applies — the same "unknown is not a failure" rule the
+  // scorer uses.
+  it('applies trust when the server recorded no authentication verdict', () => {
+    const noAuth = assessEmailSecurity({
+      ...BANK,
+      spamScore: 5,
+      spamReasons: SPAM,
+      trustedSender: true,
+    });
+    expect(noAuth.trusted).toBe(true);
+    expect(LEVEL_RANK[noAuth.level]).toBeLessThan(LEVEL_RANK.caution);
   });
 });
 
