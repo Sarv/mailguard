@@ -294,10 +294,56 @@ describe('assessSpamSignals — plumbing a real client always gets right', () =>
     const reason = assessSpamSignals({ ...CLEAN, inReplyTo: own }).reasons.find(
       (r) => r.id === 'in-reply-to-self',
     );
-    expect(reason?.points).toBe(2);
+    expect(reason?.points).toBe(1);
     expect(ids({ ...CLEAN, inReplyTo: '<other@example.net>' })).not.toContain('in-reply-to-self');
     // No Message-ID at all is the missing-message-id rule's business, not this one's.
     expect(ids({ ...CLEAN, messageId: null, inReplyTo: '' })).not.toContain('in-reply-to-self');
+  });
+
+  // Regression: a self-reply beside a sender-identity lie is the Adobe Sign
+  // lure's pair, and must still weigh 2 so the headers alone reach the spam
+  // line (brand 3 + 2). If this drops, that lure lands in the inbox green.
+  it('weighs a self-reply 2 when the sender name lies about who sent it', () => {
+    const own = CLEAN.messageId as string;
+    const brandLie = assessSpamSignals({
+      ...CLEAN,
+      fromName: 'Adobe Acrobat Sign',
+      fromAddress: 'adobesign@powersublinks.com',
+      inReplyTo: own,
+      auth: auth(),
+    });
+    expect(brandLie.reasons.find((r) => r.id === 'in-reply-to-self')?.points).toBe(2);
+    expect(brandLie.score).toBeGreaterThanOrEqual(SPAM_THRESHOLD);
+    const domainLie = assessSpamSignals({
+      ...CLEAN,
+      fromName: 'service@paypal.com',
+      fromAddress: 'x@evil.example',
+      inReplyTo: own,
+    });
+    expect(domainLie.reasons.find((r) => r.id === 'in-reply-to-self')?.points).toBe(2);
+  });
+
+  // Regression, from a live mailbox 2026-09-27: Axis Bank's genuine AutoPay
+  // notice from axis.bank.in (DMARC p=reject) names its own Message-ID in
+  // In-Reply-To and travels through an ESP with a Feedback-ID but no
+  // unsubscribe. It scored 6 and was filed as spam. Honest mail with sloppy
+  // plumbing must stay below the warning line.
+  it('keeps a genuine bank alert with a self-reply and an ESP trace below suspicious', () => {
+    const messageId = '<20260927.abc@axis.bank.in>';
+    const result = assessSpamSignals({
+      ...CLEAN,
+      fromName: 'Axis Bank Alerts',
+      fromAddress: 'alerts@axis.bank.in',
+      subject: 'AutoPay for Anthropic: ACTIVATED',
+      messageId,
+      inReplyTo: messageId,
+      auth: auth(),
+      headers: headerLookupFromText(
+        'Feedback-ID: 1:alerts:axis:netcore\r\nX-SES-Outgoing: 2026.09.27',
+      ),
+    });
+    expect(result.reasons.map((r) => r.id)).toEqual(['in-reply-to-self']);
+    expect(result.score).toBeLessThan(SUSPICIOUS_THRESHOLD);
   });
 
   it('scores a message with no visible recipient', () => {
@@ -326,6 +372,26 @@ describe('assessSpamSignals — bulk mail that breaks the bulk-mail rules', () =
       'bulk-no-unsubscribe',
     );
     expect(ids({ ...CLEAN, headers: headerLookupFromText(receipt) })).not.toContain(
+      'bulk-no-unsubscribe',
+    );
+  });
+
+  // Regression: Feedback-ID and ESP tracing headers name the pipe, not the
+  // kind of mail — a bank alert or OTP sent through SES or Netcore carries
+  // them with no unsubscribe, rightly. Only List-Id / Precedence declare bulk;
+  // if these start scoring, every transactional mail through an ESP gains a
+  // point toward the spam line.
+  it('does not treat Feedback-ID or an ESP trace as a bulk declaration', () => {
+    for (const block of [
+      'Feedback-ID: 1:2:3:ses',
+      'X-SES-Outgoing: 2026.09.27-1.2.3.4',
+      'X-Mailer: SendGrid',
+    ]) {
+      expect(ids({ ...CLEAN, headers: headerLookupFromText(block) }), block).not.toContain(
+        'bulk-no-unsubscribe',
+      );
+    }
+    expect(ids({ ...CLEAN, headers: headerLookupFromText('Precedence: bulk') })).toContain(
       'bulk-no-unsubscribe',
     );
   });

@@ -242,16 +242,22 @@ export function assessSpamSignals(input: SpamSignalInput): SpamAssessment {
   }
 
   // A reply to ITSELF. In-Reply-To is supposed to name the message being
-  // answered; naming this message's own Message-ID is something no mail
-  // client does, and something a phishing kit does to make a threading view
-  // show a conversation already under way. Two points — categorical about
-  // the headers being forged, but the forgery alone does not say the message
-  // is unwanted.
+  // answered; naming this message's own Message-ID is something a phishing
+  // kit does to make a threading view show a conversation already under way
+  // — and, it turned out, something a real bank's alert mailer does too: Axis
+  // Bank's own AutoPay notices from axis.bank.in (DMARC p=reject) carry it.
+  // So it is sloppy plumbing on its own (one point) and a corroborating tell
+  // only beside a sender-identity lie (two), which is where the Adobe Sign
+  // lure had it: brand-impersonation 3 + this 2 still reaches the spam line
+  // on the headers alone.
   const inReplyTo = (input.inReplyTo || '').trim();
   if (messageId && inReplyTo && inReplyTo === messageId) {
+    const identityLie = reasons.some(
+      (reason) => reason.id === 'brand-impersonation' || reason.id === 'display-name-spoof',
+    );
     add(
       'in-reply-to-self',
-      2,
+      identityLie ? 2 : 1,
       'Claims to be a reply to itself — In-Reply-To names this message’s own Message-ID',
     );
   }
@@ -264,9 +270,13 @@ export function assessSpamSignals(input: SpamSignalInput): SpamAssessment {
   //    tool is REQUIRED to offer List-Unsubscribe; a blast that hides it is
   //    the kind that never intended to honour one. Auto-generated transactional
   //    mail is exempt — a receipt has nothing to unsubscribe from.
+  //    Only List-Id and Precedence DECLARE bulk. Feedback-ID and an ESP's
+  //    tracing headers say which pipe the mail went through, and transactional
+  //    mail — a bank alert, an OTP, a receipt — goes through the same pipes
+  //    without an unsubscribe route, rightly, and often without Auto-Submitted.
   if (input.headers) {
     const bulk = bulkHeaderSignals(input.headers);
-    const declaredBulk = bulk.listId || bulk.precedenceBulk || bulk.feedbackId || bulk.espTrace;
+    const declaredBulk = bulk.listId || bulk.precedenceBulk;
     if (declaredBulk && !bulk.listUnsubscribe && !bulk.autoSubmitted) {
       add('bulk-no-unsubscribe', 1, 'Bulk mail with no way to unsubscribe');
     }

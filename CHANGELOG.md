@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`in-reply-to-self` weighs 1 on its own and 2 only beside a sender-identity
+  lie** (`brand-impersonation` or `display-name-spoof`). It was introduced on
+  the premise that no real mailer names its own Message-ID in In-Reply-To;
+  Axis Bank's genuine alert mailer does. Beside a lie it is still the Adobe
+  Sign lure's pair, and those headers alone still reach the spam line.
+- **`bulk-no-unsubscribe` counts only a message that DECLARES itself bulk**
+  (`List-Id`, or `Precedence: bulk | list | junk`). `Feedback-ID` and an ESP's
+  tracing headers name the sending pipe, not the kind of mail: a bank alert, an
+  OTP or a receipt goes through the same pipes with no unsubscribe route,
+  rightly, and was charged a point toward the spam line.
+
 ### Fixed
 
 - **Indian banks writing from their `.bank.in` domains were flagged as
