@@ -1,6 +1,6 @@
 {
   "name": "@sarv-in/mailguard",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "description": "Explainable spam and phishing signals for email, computed offline from the message itself. Reads SPF/DKIM/DMARC results, sender-domain spoofing and the true origin IP out of the headers, and returns a score with human-readable reasons.",
   "license": "MIT",
   "repository": {
