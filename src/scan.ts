@@ -179,18 +179,16 @@ function headerDate(value: string | undefined): number | null {
   return Number.isNaN(ms) ? null : Math.floor(ms / 1000);
 }
 
-/** Header names carrying a verdict somebody else computed. Lowercase, as `postal-mime` reports them. */
-const AUTH_HEADER_KEYS = new Set([
-  'authentication-results',
-  'arc-authentication-results',
-  'received-spf',
-]);
-
 /**
- * The authentication header lines `scan` reads, as raw text: the origin IP
- * comes out of these, and so does the verdict — through
- * `parseAuthenticationHeaders`' own rule, which believes only the
- * `Authentication-Results` among them (see `trustedAuthResults`).
+ * The authentication header lines `scan` believes, as raw text. The verdict
+ * comes out of these, and so does the origin IP.
+ *
+ * Only `Authentication-Results` lines. `ARC-Authentication-Results` is a copy
+ * a hop sealed for the next one to weigh, and `Received-SPF` names no author;
+ * either is as easy to type into a message as a forged verdict, and neither
+ * supplies the verdict or the address any more. Keeping the topmost of each,
+ * as this once did, handed the origin IP to a sender's own `Received-SPF`
+ * whenever the receiving server wrote none of its own.
  *
  * This is the one security decision `scan` makes on the caller's behalf, so it
  * is worth being exact about. Every hop PREPENDS its headers, so the topmost
@@ -204,7 +202,7 @@ const AUTH_HEADER_KEYS = new Set([
  * are kept, which is exactly what RFC 8601 gives the authserv-id for — read
  * with the real parser, so a version number (`mx.example.com 1;`) or a comment
  * after the id does not hide the server's own header. Without one, only the
- * FIRST line of each header name is kept — the conventional assumption that
+ * FIRST `Authentication-Results` is kept — the conventional assumption that
  * your own MTA is the most recent hop. That assumption is usually right and
  * occasionally not (a forwarder in front of you also prepends), which is why
  * `authserv` exists and why this returns what it kept rather than hiding it.
@@ -215,21 +213,13 @@ export function trustedAuthHeaders(
 ): string {
   const ids = normalizeAuthserv(authserv);
   const kept: string[] = [];
-  const seen = new Set<string>();
 
+  // `key` is lowercase, as `postal-mime` reports it.
   for (const { key, line } of headerLines) {
-    if (!AUTH_HEADER_KEYS.has(key)) continue;
-    if (ids.length > 0) {
-      // Only an `Authentication-Results` names its author; an ARC copy or a
-      // `Received-SPF` line cannot be matched to a server, so none is kept.
-      if (key !== 'authentication-results') continue;
-      const { authservId } = parseAuthResultsHeader(line.slice(line.indexOf(':') + 1));
-      if (authservId === null || !ids.includes(authservId)) continue;
-    } else {
-      if (seen.has(key)) continue;
-      seen.add(key);
-    }
-    kept.push(line);
+    if (key !== 'authentication-results') continue;
+    if (ids.length === 0) return line;
+    const { authservId } = parseAuthResultsHeader(line.slice(line.indexOf(':') + 1));
+    if (authservId !== null && ids.includes(authservId)) kept.push(line);
   }
   return kept.join('\n');
 }
@@ -270,7 +260,11 @@ export function scanParsed(email: Email, options: ScanOptions = {}): ScanResult 
     })),
   };
 
-  const originIp = extractOriginIp({ authHeaders: authBlock, received });
+  const originIp = extractOriginIp({
+    authHeaders: authBlock,
+    received,
+    authserv: options.authserv,
+  });
 
   if (options.ownMail) {
     return {

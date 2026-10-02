@@ -143,7 +143,7 @@ const block = extractAuthHeaderBlock(rawHeaderText);
 const auth = parseAuthenticationHeaders(block, { authserv: 'mx.example.com' });
 // { spf: 'pass', dkim: 'pass', dmarc: 'pass', overall: 'pass' }
 
-const ip = extractOriginIp({ authHeaders: block, received: receivedLines });
+const ip = extractOriginIp({ authHeaders: block, received: receivedLines, authserv: 'mx.example.com' });
 // '185.199.108.1' — public unicast only, never a private or CGNAT hop
 
 const reasons = assessSender('PayPal Support', 'billing@paypal.secure-login.ru');
@@ -202,8 +202,8 @@ the conventional assumption that your own MTA was the most recent hop — header
 are prepended, so a forged verdict the sender wrote sits below it. That
 assumption is usually right and occasionally not: a server that appends its
 header, or writes none, leaves a forgery on top. `ARC-Authentication-Results` and
-`Received-SPF` never supply the verdict — neither names its author, and both are
-as easy to type as a forged `Authentication-Results`.
+`Received-SPF` never supply the verdict or the origin IP. Neither names its
+author, and both are as easy to type as a forged `Authentication-Results`.
 `trustedAuthHeaders(headerLines, authserv?)` is exported so you can see exactly
 which lines survived.
 
@@ -275,8 +275,8 @@ already wrote into `Authentication-Results`, with an RFC 8601 parser that knows
 which server wrote each one.
 
 **Origin IP** (`extractOriginIp`) — the public address the message actually came
-from, taken from the SPF evaluator's own record where possible and the
-`Received:` trace otherwise. Private, loopback, link-local, CGNAT and reserved
+from, taken from your receiving server's own `Authentication-Results` where it
+names one and the `Received:` trace otherwise. Private, loopback, link-local, CGNAT and reserved
 ranges are rejected, so you get an address worth reputation-checking or nothing.
 
 **Real authentication** (`verifyAuthentication`) — SPF, DKIM and DMARC checked
@@ -588,10 +588,38 @@ table if you want to partition reasons some other way.
 ## Origin IP: which address actually sent this
 
 `Received:` headers are appended by each hop, and every hop below your own
-boundary was written by someone you do not control. `extractOriginIp` therefore
-prefers the address **your** SPF evaluator recorded (`client-ip=`,
-`smtp.remote-ip=`, Microsoft's `sender IP is`) over anything in the trace, and
-only walks the trace when the authentication headers name nothing.
+boundary was written by someone you do not control. So `extractOriginIp` first
+asks **your** receiving server's own `Authentication-Results`, the same header
+the verdict is read from and chosen by the same rule (see
+[Authentication results](#authentication-results-read-not-verified)). That
+header names the client the server checked, in its SPF or iprev result:
+
+- as `smtp.remote-ip=` or `policy.iprev=`;
+- in Microsoft's SPF comment, `sender IP is …`;
+- in Gmail's SPF comment, `designates … as permitted sender`, including the
+  failing and neutral wordings that spam gets.
+
+Only when that header names no address does it walk the trace. Pass the
+`authserv` you pass `parseAuthenticationHeaders`:
+
+```ts
+extractOriginIp({ authHeaders: block, received: receivedLines, authserv: 'mx.google.com' });
+```
+
+It never reads `Received-SPF` or `ARC-Authentication-Results`. Either is as easy
+to type into a message as a forged verdict. Earlier releases took the first
+`client-ip=` anywhere in the block, so a sender listed on a blocklist could add
+`Received-SPF: pass client-ip=<a clean address>` and have the blocklists asked
+about that address instead. `Received-SPF` names no author (RFC 7208's
+`receiver=` is optional, and Gmail omits it), and its position does not tie it
+to your server either: Postfix writes it above its own `Received:` line, Gmail
+below. Servers that write a real one also record the client in their
+`Authentication-Results` (Gmail, Microsoft 365) or in their own `Received:`
+line (Postfix), and the trace reads that line.
+
+Without an `authserv`, the address has the same limitation as the verdict:
+the topmost `Authentication-Results` is believed. If your server writes none,
+whoever wrote the topmost one chooses the address.
 
 Within a `Received:` line it reads the `from` clause only, stopping at `by` (the
 receiving side, not the sender) and at `;` (the timestamp). It returns the first
@@ -1126,14 +1154,14 @@ the scanner.
 - `bulkHeaderSignals(get): BulkHeaderSignals`, `hasBulkHeaderSignal(get)`, `BULK_HEADER_NAMES`
 - `extractAuthHeaderBlock(headers): string | null`
 - `parseAuthenticationHeaders(block, { authserv? }): AuthStatus` — the verdict of the headers worth believing
-- `parseAuthResultsHeader(value): AuthResultsHeader` — one `Authentication-Results` value: authserv-id and statements
+- `parseAuthResultsHeader(value): AuthResultsHeader` — one `Authentication-Results` value: authserv-id and statements, each with its properties and its comments as written
 - `type AuthResult`, `AuthResultsHeader`, `AuthResultsOptions`
 - `receivedAt(lines): number | null`, `receivedAtFromLine(line)` — delivery time from the trace
 
 ### Rules and scoring — `@sarv-in/mailguard`
 
 - `extractOriginIp(sources): string | null` — reads headers, but needs an IP parser
-- `originIpFromAuthHeaders(block)`, `originIpFromReceived(lines)`
+- `originIpFromAuthHeaders(block, { authserv? })`, `originIpFromReceived(lines)`
 - `normalizeIp(candidate)`, `isPublicIp(candidate)`
 - `assessSpamSignals(input): SpamAssessment`, `SPAM_HEADER_NAMES`, `DATE_SKEW_SECONDS`
 - `isFreemailAddress(address)`, `isValidMessageId(id)`, `hasReplyPrefix(subject)`

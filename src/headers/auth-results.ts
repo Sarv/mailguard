@@ -66,6 +66,16 @@ export interface AuthResult {
    * `constructor` is a plain key and nothing more.
    */
   properties: Record<string, string>;
+  /**
+   * The statement's `(comments)`, in order, as written between the outer
+   * parentheses: nested parentheses, quoted-pairs and quote marks are left as
+   * they are. This is free text the server wrote for people, such as Gmail's
+   * `google.com: domain of … designates 209.85.220.41 as permitted sender` or
+   * Microsoft's `sender IP is 40.107.1.2`. The verdict never reads it, because
+   * a comment is not syntax. But it is where both of those servers record the
+   * client they checked, and `extractOriginIp` reads it for that.
+   */
+  comments: string[];
 }
 
 /** One `Authentication-Results` header value, parsed. */
@@ -114,27 +124,47 @@ function skipSpace(text: string, from: number): number {
   return i;
 }
 
+/** One `;`-separated part of a value: its syntax, and the comments taken out of it. */
+interface ValuePart {
+  /** The part with every comment replaced by a space and every quoted string kept as written. */
+  text: string;
+  /** Each top-level comment's text, as written, blanks dropped. */
+  comments: string[];
+}
+
 /**
- * The value's `;`-separated parts, with every comment replaced by a space and
- * every quoted string kept as written.
+ * The value's `;`-separated parts.
  *
  * Comments go first because they are free text a server fills with whatever it
  * likes — Gmail writes `(google.com: domain of … designates … as permitted
  * sender)` — and a `;` or an `=` inside one is not a separator. Neither is one
  * inside a quoted string, which a property value may be.
+ *
+ * A comment's text is kept RAW, quoted-pairs included, rather than unescaped:
+ * an envelope address inside it may carry its own quoted local part, and the
+ * one reader of comment text (`origin-ip.ts`) has to be able to tell where
+ * that quoted stretch ends. Unescaping `\"` here would erase exactly that.
  */
-function authResultsParts(value: string): string[] {
-  const parts: string[] = [];
+function authResultsParts(value: string): ValuePart[] {
+  const parts: ValuePart[] = [];
   let current = '';
+  let comments: string[] = [];
+  let comment = '';
   let quoted = false;
   let escaped = false;
   let depth = 0;
+  const endComment = (): void => {
+    const text = comment.trim();
+    if (text) comments.push(text);
+    comment = '';
+  };
   for (const c of value) {
     if (escaped) {
-      // A quoted-pair. Kept inside a quoted string (unquoting is the reader's
-      // job), dropped with the rest of a comment.
+      // A quoted-pair. Kept as written in both places: inside a quoted string
+      // (unquoting is the reader's job) and inside a comment (see above).
       escaped = false;
       if (depth === 0) current += c;
+      else comment += c;
     } else if (quoted) {
       current += c;
       if (c === '\\') escaped = true;
@@ -142,21 +172,28 @@ function authResultsParts(value: string): string[] {
     } else if (depth > 0) {
       if (c === '\\') escaped = true;
       else if (c === '(') depth += 1;
-      else if (c === ')') {
-        depth -= 1;
-        if (depth === 0) current += ' ';
+      else if (c === ')') depth -= 1;
+      if (depth > 0) {
+        comment += c;
+      } else {
+        current += ' ';
+        endComment();
       }
     } else if (c === '(') {
       depth = 1;
     } else if (c === ';') {
-      parts.push(current);
+      parts.push({ text: current, comments });
       current = '';
+      comments = [];
     } else {
       if (c === '"') quoted = true;
       current += c;
     }
   }
-  parts.push(current);
+  // An unterminated comment runs to the end of the value, as the grammar
+  // says; what it swallowed is still the server's text, so it is kept.
+  endComment();
+  parts.push({ text: current, comments });
   return parts;
 }
 
@@ -194,7 +231,7 @@ function readWord(text: string, from: number, stops: string): number {
  * One statement: `method[/version] = result [reason=…] [ptype.property=value …]`.
  * Null for anything that is not one — the `none` form, or free text.
  */
-function parseStatement(part: string): AuthResult | null {
+function parseStatement({ text: part, comments }: ValuePart): AuthResult | null {
   let i = skipSpace(part, 0);
   const methodEnd = readWord(part, i, '=/');
   const method = part.slice(i, methodEnd).toLowerCase();
@@ -224,7 +261,7 @@ function parseStatement(part: string): AuthResult | null {
     i = next;
     if (key && !(key in properties)) properties[key] = value;
   }
-  return { method, result, properties };
+  return { method, result, properties, comments };
 }
 
 /**
@@ -236,14 +273,14 @@ function parseStatement(part: string): AuthResult | null {
  * and it parses, with `authservId: null`.
  */
 export function parseAuthResultsHeader(value: string): AuthResultsHeader {
-  const [head, ...rest] = authResultsParts(value) as [string, ...string[]];
+  const [head, ...rest] = authResultsParts(value) as [ValuePart, ...ValuePart[]];
   const results: AuthResult[] = [];
   let authservId: string | null = null;
   const headStatement = parseStatement(head);
   if (headStatement) {
     results.push(headStatement);
   } else {
-    authservId = readValue(head, skipSpace(head, 0)).value.toLowerCase() || null;
+    authservId = readValue(head.text, skipSpace(head.text, 0)).value.toLowerCase() || null;
   }
   for (const part of rest) {
     const statement = parseStatement(part);
@@ -282,6 +319,10 @@ export function normalizeAuthserv(authserv: AuthResultsOptions['authserv']): str
  * convention, not a guarantee (a server that appends, or writes none at all,
  * leaves a forged header on top), which is why the authserv-id is worth
  * configuring when it is known.
+ *
+ * `extractOriginIp` reads the client's address out of these same headers, so
+ * the verdict and the address a blocklist is asked about can never come from
+ * two different authors.
  */
 export function trustedAuthResults(
   block: string | null | undefined,

@@ -287,15 +287,46 @@ describe('scan', () => {
   // Note the address: the documentation ranges (198.51.100.0/24 and friends)
   // are reserved, and `extractOriginIp` rejects every reserved range on
   // purpose, so a fixture using one tests nothing.
-  it('reads the origin IP out of the trusted authentication headers', async () => {
+  //
+  // The trace here names a public relay of the receiving side's own, which
+  // the trace walk would report; the receiving server's header names the
+  // client it actually checked, and that is the one recorded.
+  it('reads the origin IP out of the trusted Authentication-Results', async () => {
     const result = await scan(
       message([
-        'Received: from sender.example ([93.184.216.34]) by mx.test.com; Wed, 3 Sep 2026 10:11:12 +0000',
-        'Received-SPF: pass (mx.test.com: domain of example.com designates 93.184.216.34 as permitted sender) client-ip=93.184.216.34;',
+        'Received: from relay.test.com ([185.199.108.1]) by mx.test.com; Wed, 3 Sep 2026 10:11:12 +0000',
+        'Authentication-Results: mx.test.com; spf=pass (mx.test.com: domain of example.com designates 93.184.216.34 as permitted sender) smtp.mailfrom=example.com',
         ...CLEAN.slice(2),
       ]),
     );
     expect(result.originIp).toBe('93.184.216.34');
+  });
+
+  // Regression: a listed sender typed a Received-SPF naming a clean address
+  // into its own message, and `scan` recorded that address as the origin —
+  // the one every blocklist is then asked about. The receiving server's own
+  // header names the real client, with or without an authserv-id.
+  it('records the address the receiving server saw, not a forged Received-SPF', async () => {
+    const raw = message([
+      'Received: from mta.evil.example ([93.184.216.34]) by mx.test.com; Wed, 3 Sep 2026 10:11:12 +0000',
+      'Authentication-Results: mx.test.com; spf=softfail (sender IP is 93.184.216.34) smtp.mailfrom=evil.example',
+      'Received-SPF: pass (mx.test.com: domain of evil.example designates 1.1.1.1 as permitted sender) client-ip=1.1.1.1;',
+      ...CLEAN.slice(2),
+    ]);
+    for (const options of [{}, { authserv: 'mx.test.com' }]) {
+      expect((await scan(raw, options)).originIp).toBe('93.184.216.34');
+    }
+  });
+
+  // The authserv-id reaches the origin IP: a header naming another server
+  // supplies no address, and the trace answers instead.
+  it('takes the origin IP from the trace when the configured server named none', async () => {
+    const raw = message([
+      'Received: from mta.evil.example ([93.184.216.34]) by mx.test.com; Wed, 3 Sep 2026 10:11:12 +0000',
+      'Authentication-Results: evil.example; spf=pass (sender IP is 1.1.1.1) smtp.mailfrom=evil.example',
+      ...CLEAN.slice(2),
+    ]);
+    expect((await scan(raw, { authserv: 'mx.test.com' })).originIp).toBe('93.184.216.34');
   });
 
   // Regression: the trace is the fallback when no authentication header names
@@ -397,14 +428,18 @@ describe('trustedAuthHeaders', () => {
     expect(kept).not.toContain('dmarc=pass');
   });
 
-  it('keeps one of each distinct name, not just one line overall', () => {
+  // CHANGED: this kept the topmost line of EACH name, so the topmost
+  // Received-SPF and ARC copy rode along — and `scan` read the origin IP out
+  // of a Received-SPF the sender wrote whenever the receiving server wrote
+  // none. Neither supplies anything now, so neither is kept.
+  it('keeps only the topmost Authentication-Results, and no ARC or Received-SPF line', () => {
     const kept = trustedAuthHeaders([
       line('received-spf', 'pass (mx.test.com) client-ip=198.51.100.20;'),
-      line('authentication-results', 'mx.test.com; dmarc=pass'),
       line('arc-authentication-results', 'i=1; mx.test.com; dmarc=pass'),
+      line('authentication-results', 'mx.test.com; dmarc=pass'),
       line('authentication-results', 'evil.example; dmarc=pass'),
     ]);
-    expect(kept.split('\n')).toHaveLength(3);
+    expect(kept).toBe('authentication-results: mx.test.com; dmarc=pass');
   });
 
   // Regression: a forwarder in front of you also prepends, so "topmost" is a
@@ -512,8 +547,10 @@ describe('scan with an authserv configured', () => {
     ]);
     const result = await scan(raw);
     expect(result.auth).toBeNull();
-    // The origin IP still comes from the Received-SPF line it always read.
-    expect(result.originIp).toBe('93.184.216.34');
+    // CHANGED: the origin IP used to come from that Received-SPF line — an
+    // address the sender may have typed. It names no author, so it supplies
+    // nothing; with no external hop in the trace either, nothing is recorded.
+    expect(result.originIp).toBeNull();
   });
 });
 

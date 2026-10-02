@@ -23,6 +23,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and an SPF result for the envelope sender outranks one for the HELO name.
   `scan()` reads its verdict through the same rule, so a forged ARC header can
   no longer outrank the real verdict there either.
+- **A forged `Received-SPF` no longer chooses the origin IP.** That IP is the
+  address every DNS blocklist is asked about. `extractOriginIp` used to take
+  the first `client-ip=` anywhere in the authentication block, ahead of every
+  other source, so a listed spam source could type
+  `Received-SPF: pass client-ip=<a clean address>` into its own message, and
+  the blocklists were asked about the clean address instead.
+  - The address now comes only from the receiving server's own
+    `Authentication-Results`. That is the header the verdict is read from,
+    chosen by the same rule, and it is read from its SPF or iprev result:
+    `smtp.remote-ip=`, `policy.iprev=`, or the SPF comment (Gmail's
+    `designates …`, `does not designate …` and `… is neither permitted nor
+    denied`, and Microsoft's `sender IP is …`).
+  - Failing that, the address comes from the `Received:` trace.
+  - `Received-SPF` and `ARC-Authentication-Results` are never read. Neither
+    names its author, and nothing ties a `Received-SPF` to the receiving
+    server, not even its position.
+  - Pass the new `authserv` option to `extractOriginIp` /
+    `originIpFromAuthHeaders` (`scan()` passes its own), and the address
+    comes only from that server's header.
+  - With several headers carrying that id, only the topmost one that
+    checked the client is read. A forgery that copied the id sits below the
+    real header and is never consulted.
+  - An envelope sender quoted into the server's comment cannot put words in
+    its mouth: quoted stretches are not read.
 
 ### Added
 
@@ -30,7 +54,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   parsed: its authserv-id (`null` for Microsoft 365's id-less format) and each
   `method=result` statement with its `reason` and `ptype.property` values.
   Comments (nested included) and quoted strings are handled, so a `;` or
-  `dmarc=pass` inside either is text, not syntax.
+  `dmarc=pass` inside either is text, not syntax. Each statement carries its
+  `comments` as written, which is where Gmail and Microsoft 365 record the
+  client they checked.
+- **`authserv` on `extractOriginIp` and `originIpFromAuthHeaders`** — the
+  same value `parseAuthenticationHeaders` takes, so the origin IP and the
+  verdict come from the same header.
 
 ### Changed
 
@@ -40,8 +69,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   block. `spf=hardfail` (RFC 5451's spelling of `fail`) now reads as `fail`.
 - `trustedAuthHeaders` reads a configured authserv-id with the same parser,
   so a version number or comment after the id (`mx.example.com 1;`) no longer
-  hides the server's own header, and keeps no ARC or `Received-SPF` line on
-  an id.
+  hides the server's own header. It keeps only `Authentication-Results`
+  lines: without an id, the topmost one, where it used to keep the topmost
+  line of each name, so the topmost `Received-SPF` and ARC copy rode along.
+- `extractOriginIp` and `originIpFromAuthHeaders` no longer read
+  `Received-SPF` or `ARC-Authentication-Results`. A message whose only source
+  of an address was one of them now takes it from the `Received:` trace, or
+  records none.
 
 ## [0.4.2] - 2026-09-28
 

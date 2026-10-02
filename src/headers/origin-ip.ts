@@ -8,19 +8,43 @@
  *
  * Two sources, in order of trust:
  *
- *   1. The receiving server's own SPF evaluation. `Received-SPF` carries the
- *      address it checked as `client-ip=`; `Authentication-Results` repeats it
- *      in the SPF comment ("sender IP is x", "designates x as permitted
- *      sender") or as `smtp.remote-ip=` (RFC 8601 iprev). This is
- *      authoritative: it IS the connecting client as the server saw it.
- *      Headers are prepended hop by hop, so the first match top-down is the
- *      verdict OUR server wrote, not one a forwarder carried along in an ARC
- *      header.
+ *   1. The receiving server's own `Authentication-Results`. This is the SAME
+ *      header the authentication verdict is read from, chosen by the same rule
+ *      (`trustedAuthResults`): with an authserv-id configured, the headers
+ *      that carry it; without one, the topmost. The server names the client it
+ *      checked in its SPF and iprev results, either as `smtp.remote-ip=` /
+ *      `policy.iprev=` (RFC 8601 §2.7.3; Exim, Fastmail) or inside the SPF
+ *      comment (Gmail's "designates x as permitted sender", Microsoft's
+ *      "sender IP is x"). This is authoritative: it IS the connecting client
+ *      as the server saw it.
  *   2. The `Received:` trace, top down. The first hop written with a `from`
  *      clause naming a PUBLIC address is the last external handoff. This is
- *      the fallback for servers that record no SPF result at all. It is a
- *      heuristic — a provider whose internal relays use public addresses will
- *      name one of those first — which is why the SPF sources win when present.
+ *      the fallback for servers that record no address in a trusted header.
+ *      It is a heuristic — a provider whose internal relays use public
+ *      addresses will name one of those first — which is why the trusted
+ *      header wins when it names one.
+ *
+ * NOT a source, wherever it sits: `Received-SPF` and
+ * `ARC-Authentication-Results`. Earlier releases read the first `client-ip=`
+ * anywhere in the authentication block, ahead of every other phrasing. So a
+ * sender who typed `Received-SPF: pass … client-ip=<a clean address>` into
+ * their own message chose the address every blocklist was asked about, and a
+ * listed spam source walked straight past the reputation stage.
+ *
+ * - An ARC header is a copy one hop sealed for the next to weigh, and anybody
+ *   can write one.
+ * - `Received-SPF` names no author. RFC 7208's `receiver=` is optional and
+ *   Gmail leaves it out, so no authserv-id can be matched against it.
+ * - Its POSITION does not tie it to the receiving server either. Postfix's
+ *   policy service writes it above the server's own `Received:` line, and
+ *   Gmail writes it below. A caller who hands the authentication block and
+ *   the trace over separately, as `OriginIpSources` does, has lost the
+ *   interleaving anyway.
+ *
+ * Dropping it costs nothing on the servers seen in practice. Every one that
+ * writes a real `Received-SPF` also records the client either in its
+ * `Authentication-Results` (Gmail, Microsoft 365) or in its own `Received:`
+ * line (Postfix), and the trace reads that line.
  *
  * Private, loopback, link-local, carrier-NAT and IPv4-mapped-private addresses
  * are never returned: they are the receiving side's own plumbing, and a
@@ -30,6 +54,13 @@
  * here only finds candidate tokens and asks it.
  */
 import ipaddr from 'ipaddr.js';
+
+import {
+  trustedAuthResults,
+  type AuthResult,
+  type AuthResultsHeader,
+  type AuthResultsOptions,
+} from './auth-results.js';
 
 const IPV4_SHAPE = /^\d{1,3}(?:\.\d{1,3}){3}$/;
 
@@ -64,28 +95,148 @@ export function isPublicIp(candidate: string | null | undefined): boolean {
   return ip !== null && ipaddr.process(ip).range() === 'unicast';
 }
 
-/** Where an SPF evaluator writes the address it checked. Order = preference. */
-const AUTH_IP_PATTERNS: readonly RegExp[] = [
-  /\bclient-ip=([^;\s()]+)/gi,
-  /\bsender ip is ([^;\s()]+)/gi,
-  /\bdesignates ([^;\s()]+) as permitted sender/gi,
-  /\bsmtp\.remote-ip=([^;\s()]+)/gi,
-];
+/**
+ * The properties a server names the connecting client in: RFC 8601 §2.7.3
+ * registers `policy.iprev` for the iprev method, and Exim and Fastmail write
+ * `smtp.remote-ip`. Properties are syntax, so they are read before comments.
+ */
+const CLIENT_IP_PROPERTIES = ['smtp.remote-ip', 'policy.iprev'] as const;
 
-/** The connecting client's address from the authentication header block. */
-export function originIpFromAuthHeaders(block: string | null | undefined): string | null {
-  if (!block) return null;
-  for (const pattern of AUTH_IP_PATTERNS) {
-    for (const match of block.matchAll(pattern)) {
-      // Group 1 is not optional in the pattern, so a match always carries it. The
-      // index type is `| undefined` only because `noUncheckedIndexedAccess` is on,
-      // and a `?? ''` fallback here would be an unreachable branch that the 100%
-      // coverage gate could never be satisfied for honestly.
-      const ip = normalizeIp(match[1] as string);
+/**
+ * True for the two checks that are ABOUT the connecting client: whether it may
+ * send for the domain (SPF) and whether its reverse DNS holds up (iprev).
+ * Those are the results a server names the client in. DKIM and DMARC judge the
+ * message, not the client, so they are not read for an address.
+ */
+function evaluatesClient(result: AuthResult): boolean {
+  return result.method === 'spf' || result.method === 'iprev';
+}
+
+/** What ends a word in a comment. */
+const WORD_SEPARATORS = ' \t\r\n;,';
+
+/**
+ * The words of a comment, lowercased, with every quoted stretch left out.
+ *
+ * A quoted stretch is how a sender's own words get into the server's comment.
+ * Gmail writes "domain of <envelope sender> designates …", and an envelope
+ * sender's local part may be a quoted string with spaces in it. Read as words,
+ * `"x designates 1.2.3.4 as permitted sender"@evil.example` would put a phrase
+ * the sender chose ahead of the server's own. A local part WITHOUT quotes
+ * cannot contain a space, so it stays one word and cannot spell a phrase.
+ * Commas and semicolons end a word too, so `client-ip=x;` reads as the address
+ * alone.
+ */
+function commentWords(comment: string): string[] {
+  const words: string[] = [];
+  let word = '';
+  let quoted = false;
+  let escaped = false;
+  const endWord = (): void => {
+    if (word) words.push(word.toLowerCase());
+    word = '';
+  };
+  for (const c of comment) {
+    if (escaped) {
+      escaped = false;
+    } else if (quoted) {
+      if (c === '\\') escaped = true;
+      else if (c === '"') quoted = false;
+    } else if (c === '"') {
+      quoted = true;
+    } else if (WORD_SEPARATORS.includes(c)) {
+      endWord();
+    } else {
+      word += c;
+    }
+  }
+  endWord();
+  return words;
+}
+
+/**
+ * The client addresses a comment names, in the phrasings servers use:
+ *
+ *   - `designates <ip> as permitted sender` (Gmail, and the many servers that
+ *     copy its wording), and the failing form `does not designate <ip> as
+ *     permitted sender`;
+ *   - `<ip> is neither permitted nor denied` (Gmail's neutral);
+ *   - `sender IP is <ip>` (Microsoft 365, for every result);
+ *   - `client-ip=<ip>` (an SPF comment written in `Received-SPF` style).
+ *
+ * The failing forms matter as much as the passing one. Spam is the mail whose
+ * SPF fails, and an address missed there is a blocklist never asked. Each
+ * candidate is the word in the address slot; the caller drops any that is not
+ * an address.
+ */
+function commentAddresses(comment: string): (string | undefined)[] {
+  const words = commentWords(comment);
+  const found: (string | undefined)[] = [];
+  words.forEach((word, i) => {
+    if (word.startsWith('client-ip=')) {
+      found.push(word.slice('client-ip='.length));
+    } else if (
+      (word === 'designates' || word === 'designate') &&
+      words[i + 2] === 'as' &&
+      words[i + 3] === 'permitted'
+    ) {
+      found.push(words[i + 1]);
+    } else if (word === 'sender' && words[i + 1] === 'ip' && words[i + 2] === 'is') {
+      found.push(words[i + 3]);
+    } else if (words[i + 1] === 'is' && words[i + 2] === 'neither') {
+      found.push(word);
+    }
+  });
+  return found;
+}
+
+/** Every address one result names as the client: properties first, then comments. */
+function clientAddresses(result: AuthResult): (string | undefined)[] {
+  return [
+    ...CLIENT_IP_PROPERTIES.map((name) => result.properties[name]),
+    ...result.comments.flatMap(commentAddresses),
+  ];
+}
+
+/**
+ * The client's address from the trusted `Authentication-Results`, read from
+ * ONE header: the topmost trusted header that reports an SPF or iprev result.
+ *
+ * With an authserv-id configured, several headers can carry it. Some are
+ * honest: a server may write one per filter. But a sender can also copy the id
+ * onto a header of their own. RFC 8601 §5 tells the server to strip such a
+ * header, and not every server does. The forgery always sits BELOW the real
+ * header, because it was in the message before the server prepended anything.
+ * So the topmost header that checked the client is the server's own. If that
+ * header names no address, a header further down cannot be told apart from a
+ * forgery, so none is taken and the trace answers instead. Gmail's SPF `none`
+ * is such a header: "does not designate permitted sender hosts", and no
+ * address.
+ */
+function originIpFromTrusted(headers: readonly AuthResultsHeader[]): string | null {
+  const header = headers.find((candidate) => candidate.results.some(evaluatesClient));
+  for (const result of header?.results.filter(evaluatesClient) ?? []) {
+    for (const candidate of clientAddresses(result)) {
+      const ip = normalizeIp(candidate);
       if (ip && isPublicIp(ip)) return ip;
     }
   }
   return null;
+}
+
+/**
+ * The connecting client's address, as the receiving server's own
+ * `Authentication-Results` records it. See the module comment for which
+ * header that is, and for why `Received-SPF` and ARC headers are never read.
+ *
+ * Pass the `authserv` you pass `parseAuthenticationHeaders`, so the address
+ * and the verdict come from the same header.
+ */
+export function originIpFromAuthHeaders(
+  block: string | null | undefined,
+  options: AuthResultsOptions = {},
+): string | null {
+  return originIpFromTrusted(trustedAuthResults(block, options));
 }
 
 /**
@@ -128,9 +279,19 @@ export interface OriginIpSources {
   authHeaders?: string | null;
   /** Every `Received:` value, unfolded, in header order (newest first). */
   received?: readonly string[] | null;
+  /**
+   * The receiving server's authserv-id(s), the same value
+   * `parseAuthenticationHeaders` takes. Given one, the address comes only from
+   * that server's `Authentication-Results`. Absent, it comes from the topmost
+   * one, which a server that writes none leaves to whoever wrote one.
+   */
+  authserv?: AuthResultsOptions['authserv'];
 }
 
 /** The one address to record, or null when no source names a public one. */
 export function extractOriginIp(sources: OriginIpSources): string | null {
-  return originIpFromAuthHeaders(sources.authHeaders) ?? originIpFromReceived(sources.received);
+  return (
+    originIpFromAuthHeaders(sources.authHeaders, { authserv: sources.authserv }) ??
+    originIpFromReceived(sources.received)
+  );
 }

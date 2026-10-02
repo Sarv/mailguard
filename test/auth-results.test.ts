@@ -427,8 +427,14 @@ describe('parseAuthResultsHeader', () => {
           method: 'dkim',
           result: 'pass',
           properties: { 'header.i': '@sarv.com', 'header.s': 'google' },
+          comments: [],
         },
-        { method: 'spf', result: 'pass', properties: { 'smtp.mailfrom': 'sarv.com' } },
+        {
+          method: 'spf',
+          result: 'pass',
+          properties: { 'smtp.mailfrom': 'sarv.com' },
+          comments: [],
+        },
       ],
     });
   });
@@ -458,19 +464,45 @@ describe('parseAuthResultsHeader', () => {
 
   // A `;` or `=` inside a comment is not syntax: Gmail's SPF comment alone
   // carries a colon and an address. Comments nest, and a quoted-pair inside
-  // one escapes a parenthesis.
-  it('ignores comments, nested ones included', () => {
+  // one escapes a parenthesis. The comment comes back as text on its
+  // statement, and never as a statement or a property.
+  it('keeps comments out of the syntax, nested ones included', () => {
     const header = parseAuthResultsHeader(
       'mx.example.com (the MX; dmarc=pass (nested \\) paren) here); spf=fail (google.com: dmarc=pass; x=y) smtp.mailfrom=a.example',
     );
     expect(header).toEqual({
       authservId: 'mx.example.com',
-      results: [{ method: 'spf', result: 'fail', properties: { 'smtp.mailfrom': 'a.example' } }],
+      results: [
+        {
+          method: 'spf',
+          result: 'fail',
+          properties: { 'smtp.mailfrom': 'a.example' },
+          comments: ['google.com: dmarc=pass; x=y'],
+        },
+      ],
     });
-    // An unterminated comment swallows the rest of the value, as the grammar says.
+    // An unterminated comment swallows the rest of the value, as the grammar
+    // says. What it swallowed is still the server's text, so it is kept.
     expect(parseAuthResultsHeader('mx; spf=pass (unterminated; dmarc=pass').results).toEqual([
-      { method: 'spf', result: 'pass', properties: {} },
+      { method: 'spf', result: 'pass', properties: {}, comments: ['unterminated; dmarc=pass'] },
     ]);
+  });
+
+  // The comments are kept because two of the biggest receivers record the
+  // client's address in one: without them the origin IP of every Gmail and
+  // Microsoft 365 message falls back to the Received trace. Each statement gets
+  // its own; the authserv-id's comment and an empty `()` are nobody's. Kept
+  // RAW: unescaping `\"` would erase where a quoted envelope address inside
+  // the comment ends, which is how origin-ip.ts keeps a sender's words out.
+  it('hands each statement its own comments, as written', () => {
+    const header = parseAuthResultsHeader(
+      'mx.example.com (head); spf=pass (one) smtp.mailfrom=a.example (two (nested)) (); dkim=pass (a \\) b "q\\"x")',
+    );
+    expect(header.results.map((result) => result.comments)).toEqual([
+      ['one', 'two (nested)'],
+      ['a \\) b "q\\"x"'],
+    ]);
+    expect(header.results[0]?.properties).toEqual({ 'smtp.mailfrom': 'a.example' });
   });
 
   // A `;` inside a quoted value is not a separator either: an envelope address
@@ -484,11 +516,13 @@ describe('parseAuthResultsHeader', () => {
         method: 'dkim',
         result: 'fail',
         properties: { reason: 'signature; "bad"', 'header.d': 'example.com' },
+        comments: [],
       },
       {
         method: 'spf',
         result: 'pass',
         properties: { 'smtp.mailfrom': 'john; dmarc=pass@example.com' },
+        comments: [],
       },
     ]);
   });
@@ -500,7 +534,9 @@ describe('parseAuthResultsHeader', () => {
       parseAuthResultsHeader('mx.example.com 1; dkim/1 = pass header.d = example.com'),
     ).toEqual({
       authservId: 'mx.example.com',
-      results: [{ method: 'dkim', result: 'pass', properties: { 'header.d': 'example.com' } }],
+      results: [
+        { method: 'dkim', result: 'pass', properties: { 'header.d': 'example.com' }, comments: [] },
+      ],
     });
     expect(parseAuthResultsHeader('"MX Example"; spf=pass').authservId).toBe('mx example');
     expect(parseAuthResultsHeader('dkim / 1=pass').results[0]?.method).toBe('dkim');
