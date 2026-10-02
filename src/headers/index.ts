@@ -26,5 +26,12 @@ export {
   BULK_HEADER_NAMES,
   type BulkHeaderSignals,
 } from './bulk.js';
-export { extractAuthHeaderBlock, parseAuthenticationHeaders } from './auth-results.js';
+export {
+  extractAuthHeaderBlock,
+  parseAuthenticationHeaders,
+  parseAuthResultsHeader,
+  type AuthResult,
+  type AuthResultsHeader,
+  type AuthResultsOptions,
+} from './auth-results.js';
 export { receivedAt, receivedAtFromLine } from './received-date.js';

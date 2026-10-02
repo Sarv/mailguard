@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **A forged `Authentication-Results` no longer reads as authenticated.**
+  `parseAuthenticationHeaders` used to scan every `Authentication-Results`,
+  `ARC-Authentication-Results` and `Received-SPF` line for substrings and look
+  for `dmarc=pass` before `dmarc=fail`, so a sender who typed
+  `Authentication-Results: …; dmarc=pass` into their own message was believed
+  over the receiving server's failure. It is now an RFC 8601 parser that
+  believes only `Authentication-Results`: with the new `{ authserv }` option,
+  every header carrying your receiving server's authserv-id; without it, the
+  topmost header only. ARC copies and `Received-SPF` never supply the verdict.
+  When trusted headers disagree the worse result wins — a pass has to be
+  unanimous — except that one passing DKIM signature in a header is a pass,
+  and an SPF result for the envelope sender outranks one for the HELO name.
+  `scan()` reads its verdict through the same rule, so a forged ARC header can
+  no longer outrank the real verdict there either.
+
+### Added
+
+- **`parseAuthResultsHeader(value)`** — one `Authentication-Results` value
+  parsed: its authserv-id (`null` for Microsoft 365's id-less format) and each
+  `method=result` statement with its `reason` and `ptype.property` values.
+  Comments (nested included) and quoted strings are handled, so a `;` or
+  `dmarc=pass` inside either is text, not syntax.
+
+### Changed
+
+- `parseAuthenticationHeaders` reads only lines named
+  `Authentication-Results`. A bare `dmarc=pass`, or any other header name,
+  is no longer read — which also makes it safe to hand a whole raw header
+  block. `spf=hardfail` (RFC 5451's spelling of `fail`) now reads as `fail`.
+- `trustedAuthHeaders` reads a configured authserv-id with the same parser,
+  so a version number or comment after the id (`mx.example.com 1;`) no longer
+  hides the server's own header, and keeps no ARC or `Received-SPF` line on
+  an id.
+
 ## [0.4.2] - 2026-09-28
 
 ### Fixed

@@ -38,9 +38,13 @@ export {
   headerValueFromText,
   headerValuesFromText,
   parseAuthenticationHeaders,
+  parseAuthResultsHeader,
   receivedAt,
   receivedAtFromLine,
   BULK_HEADER_NAMES,
+  type AuthResult,
+  type AuthResultsHeader,
+  type AuthResultsOptions,
   type BulkHeaderSignals,
   type HeaderLookup,
 } from './headers/index.js';

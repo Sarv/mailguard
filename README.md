@@ -139,7 +139,8 @@ import {
 } from '@sarv-in/mailguard';
 
 const block = extractAuthHeaderBlock(rawHeaderText);
-const auth = parseAuthenticationHeaders(block);
+// Your receiving server's authserv-id, when you know it — see below.
+const auth = parseAuthenticationHeaders(block, { authserv: 'mx.example.com' });
 // { spf: 'pass', dkim: 'pass', dmarc: 'pass', overall: 'pass' }
 
 const ip = extractOriginIp({ authHeaders: block, received: receivedLines });
@@ -196,12 +197,15 @@ authserv-id (usually its hostname) at the start of the header it writes.
 await scan(raw, { authserv: 'mx.example.com' }); // only that server is believed
 ```
 
-Without one, `scan` keeps the **topmost** line of each authentication header and
-discards the rest, on the conventional assumption that your own MTA was the most
-recent hop — headers are prepended, so a forged verdict the sender wrote sits at
-the bottom. That assumption is usually right and occasionally not: a forwarder
-in front of you also prepends. `trustedAuthHeaders(headerLines, authserv?)` is
-exported so you can see exactly which lines survived.
+Without one, `scan` believes only the **topmost** `Authentication-Results`, on
+the conventional assumption that your own MTA was the most recent hop — headers
+are prepended, so a forged verdict the sender wrote sits below it. That
+assumption is usually right and occasionally not: a server that appends its
+header, or writes none, leaves a forgery on top. `ARC-Authentication-Results` and
+`Received-SPF` never supply the verdict — neither names its author, and both are
+as easy to type as a forged `Authentication-Results`.
+`trustedAuthHeaders(headerLines, authserv?)` is exported so you can see exactly
+which lines survived.
 
 **Other options.** `receivedAt` (unix seconds) is the delivery time the
 date-skew rule compares the sender's `Date:` against; it defaults to the
@@ -265,9 +269,10 @@ mailbox owner's own organisation with `[...PROTECTED_BRANDS, own]`; pass the
 same list to the scorer and the shield, or they will disagree about a name.
 `pnpm verify:brands` audits the list against the registries and the DNS.
 
-**Authentication results** (`extractAuthHeaderBlock`, `parseAuthenticationHeaders`)
-— reads the SPF/DKIM/DMARC verdicts your own MTA already wrote into
-`Authentication-Results`, `ARC-Authentication-Results` and `Received-SPF`.
+**Authentication results** (`extractAuthHeaderBlock`, `parseAuthenticationHeaders`,
+`parseAuthResultsHeader`) — reads the SPF/DKIM/DMARC verdicts your own MTA
+already wrote into `Authentication-Results`, with an RFC 8601 parser that knows
+which server wrote each one.
 
 **Origin IP** (`extractOriginIp`) — the public address the message actually came
 from, taken from the SPF evaluator's own record where possible and the
@@ -600,9 +605,31 @@ not perform SPF, DKIM or DMARC verification itself — that needs live DNS and t
 original unmodified message, neither of which a header block contains.
 
 The practical consequence: only trust these values for headers added **at or
-above your own trust boundary**. Feed `parseAuthenticationHeaders` the output of
-`extractAuthHeaderBlock`, never a whole raw header dump — otherwise a sender can
-simply write `X-Anything: dmarc=pass` into a message and be believed.
+above your own trust boundary**. A sender can type
+`Authentication-Results: mx.example.com; dmarc=pass` into their own message, so
+`parseAuthenticationHeaders` decides which headers to believe (RFC 8601):
+
+- **Only `Authentication-Results`.** Never `ARC-Authentication-Results` (a copy a
+  hop sealed for the next one to weigh) or `Received-SPF` (which names no
+  author), and never a look-alike name such as `X-Authentication-Results`.
+- **With `{ authserv }`**, every header carrying your receiving server's
+  authserv-id, wherever it sits. RFC 8601 §5 obliges that server to delete any
+  it did not write; for one that does not, the rule below keeps a forgery from
+  outvoting it.
+- **Without it**, the topmost header only.
+- **When trusted headers disagree, the worse result wins**: a pass has to be
+  unanimous, and one `fail` is never outvoted. (Several DKIM signatures in ONE
+  header are the exception — one valid signature is a valid signature — and an
+  SPF result for the envelope sender outranks one for the HELO name.)
+
+```ts
+parseAuthenticationHeaders(block, { authserv: 'mx.google.com' }); // Gmail's
+parseAuthenticationHeaders(block, { authserv: ['mx1.example.com', 'mx2.example.com'] });
+```
+
+Microsoft 365 writes no authserv-id at all; its header parses (see
+`parseAuthResultsHeader`) and is believed when it is the topmost and no id is
+configured, but can never match one that is.
 
 `scan` makes this decision for you from the `authserv` option — see
 [Scanning a whole message](#scanning-a-whole-message).
@@ -1098,7 +1125,9 @@ the scanner.
 - `headerLookupFromText(headers): HeaderLookup`, `headerValueFromText`, `headerValuesFromText`
 - `bulkHeaderSignals(get): BulkHeaderSignals`, `hasBulkHeaderSignal(get)`, `BULK_HEADER_NAMES`
 - `extractAuthHeaderBlock(headers): string | null`
-- `parseAuthenticationHeaders(block): AuthStatus`
+- `parseAuthenticationHeaders(block, { authserv? }): AuthStatus` — the verdict of the headers worth believing
+- `parseAuthResultsHeader(value): AuthResultsHeader` — one `Authentication-Results` value: authserv-id and statements
+- `type AuthResult`, `AuthResultsHeader`, `AuthResultsOptions`
 - `receivedAt(lines): number | null`, `receivedAtFromLine(line)` — delivery time from the trace
 
 ### Rules and scoring — `@sarv-in/mailguard`

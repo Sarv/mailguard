@@ -440,6 +440,21 @@ describe('trustedAuthHeaders', () => {
       'authentication-results: mx.test.com; dmarc=pass',
     );
   });
+  // Regression: the authserv-id is read by the RFC 8601 parser, not as "the
+  // text before the first `;`". A version number or a comment after the id
+  // used to hide the server's own header, and an ARC copy or a Received-SPF
+  // line — neither of which names an author — must never be kept on an id.
+  it('matches the authserv-id through versions and comments, and only on Authentication-Results', () => {
+    const lines = [
+      line('arc-authentication-results', 'i=1; mx.test.com; dmarc=pass'),
+      line('received-spf', 'pass (mx.test.com) client-ip=93.184.216.34;'),
+      line('authentication-results', 'spf=pass smtp.mailfrom=example.com; dmarc=pass'),
+      line('authentication-results', 'mx.test.com 1 (Postfix); dmarc=fail'),
+    ];
+    expect(trustedAuthHeaders(lines, 'mx.test.com')).toBe(
+      'authentication-results: mx.test.com 1 (Postfix); dmarc=fail',
+    );
+  });
 });
 
 describe('scan with an authserv configured', () => {
@@ -462,6 +477,43 @@ describe('scan with an authserv configured', () => {
       expect(result.auth?.dmarc).toBe('fail');
       expect(result.reasons.map((reason) => reason.id)).toContain('auth-failed');
     }
+  });
+
+  // Regression: a forged ARC-Authentication-Results sits ABOVE the real
+  // header — ARC headers are prepended too, so an attacker's copy can be the
+  // topmost ARC line. It used to be kept, and its `dmarc=pass` was read before
+  // the real `dmarc=fail`. ARC never supplies the verdict now.
+  it('ignores a forged ARC-Authentication-Results above the real verdict', async () => {
+    const raw = message([
+      'ARC-Authentication-Results: i=1; mx.test.com; spf=pass; dkim=pass; dmarc=pass',
+      RECEIVED,
+      'Authentication-Results: mx.test.com; dmarc=fail header.from=paypal.com',
+      'Message-ID: <x@evil.example>',
+      'Date: Wed, 3 Sep 2026 10:11:00 +0000',
+      'From: billing@evil.example',
+      'To: sam@test.com',
+      'Subject: hello',
+    ]);
+    for (const options of [{}, { authserv: 'mx.test.com' }]) {
+      const result = await scan(raw, options);
+      expect(result.auth?.dmarc).toBe('fail');
+      expect(result.reasons.map((reason) => reason.id)).toContain('auth-failed');
+    }
+  });
+
+  // An ARC copy or a Received-SPF line alone is nothing to trust: the verdict
+  // is null ("no verdict"), not an all-unknown one that reads as though a
+  // server had been asked and shrugged.
+  it('reports no verdict when only ARC or Received-SPF headers are present', async () => {
+    const raw = message([
+      'ARC-Authentication-Results: i=1; mx.test.com; dmarc=pass',
+      'Received-SPF: pass (mx.test.com) client-ip=93.184.216.34;',
+      ...CLEAN.slice(2),
+    ]);
+    const result = await scan(raw);
+    expect(result.auth).toBeNull();
+    // The origin IP still comes from the Received-SPF line it always read.
+    expect(result.originIp).toBe('93.184.216.34');
   });
 });
 

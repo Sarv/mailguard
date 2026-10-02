@@ -32,7 +32,13 @@ import PostalMime, { type Address, type Email } from 'postal-mime';
 
 import { assessAttachmentSignals } from './attachments/rules.js';
 import { assessContentSignals } from './content/rules.js';
-import { extractAuthHeaderBlock, parseAuthenticationHeaders } from './headers/auth-results.js';
+import {
+  authStatusFromResults,
+  extractAuthHeaderBlock,
+  normalizeAuthserv,
+  parseAuthResultsHeader,
+  trustedAuthResults,
+} from './headers/auth-results.js';
 import { headerLookupFromText, headerValuesFromText } from './headers/lookup.js';
 import { extractOriginIp } from './headers/origin-ip.js';
 import { receivedAt } from './headers/received-date.js';
@@ -181,7 +187,10 @@ const AUTH_HEADER_KEYS = new Set([
 ]);
 
 /**
- * The authentication headers worth believing, as raw text for the parser.
+ * The authentication header lines `scan` reads, as raw text: the origin IP
+ * comes out of these, and so does the verdict — through
+ * `parseAuthenticationHeaders`' own rule, which believes only the
+ * `Authentication-Results` among them (see `trustedAuthResults`).
  *
  * This is the one security decision `scan` makes on the caller's behalf, so it
  * is worth being exact about. Every hop PREPENDS its headers, so the topmost
@@ -191,8 +200,10 @@ const AUTH_HEADER_KEYS = new Set([
  * has simply typed `Authentication-Results: dmarc=pass` into their own message
  * puts it.
  *
- * So: with an `authserv` configured, only that server's lines are kept, which
- * is exactly what RFC 8601 gives the authserv-id for. Without one, only the
+ * So: with an `authserv` configured, only that server's `Authentication-Results`
+ * are kept, which is exactly what RFC 8601 gives the authserv-id for — read
+ * with the real parser, so a version number (`mx.example.com 1;`) or a comment
+ * after the id does not hide the server's own header. Without one, only the
  * FIRST line of each header name is kept — the conventional assumption that
  * your own MTA is the most recent hop. That assumption is usually right and
  * occasionally not (a forwarder in front of you also prepends), which is why
@@ -202,22 +213,18 @@ export function trustedAuthHeaders(
   headerLines: readonly { key: string; line: string }[],
   authserv?: string | readonly string[],
 ): string {
-  const wanted = typeof authserv === 'string' ? [authserv] : (authserv ?? []);
-  const ids = wanted.map((id) => id.trim().toLowerCase()).filter(Boolean);
+  const ids = normalizeAuthserv(authserv);
   const kept: string[] = [];
   const seen = new Set<string>();
 
   for (const { key, line } of headerLines) {
     if (!AUTH_HEADER_KEYS.has(key)) continue;
     if (ids.length > 0) {
-      // The authserv-id is the first token of the value, before the first `;`.
-      // `split` always yields at least one element, so group 0 is always
-      // there; the index type is `| undefined` only because
-      // `noUncheckedIndexedAccess` is on, and a `?? ''` fallback here would be
-      // an unreachable branch the 100% coverage gate could never honestly meet.
-      const value = line.slice(line.indexOf(':') + 1);
-      const declared = (value.split(';')[0] as string).trim().toLowerCase();
-      if (!ids.includes(declared)) continue;
+      // Only an `Authentication-Results` names its author; an ARC copy or a
+      // `Received-SPF` line cannot be matched to a server, so none is kept.
+      if (key !== 'authentication-results') continue;
+      const { authservId } = parseAuthResultsHeader(line.slice(line.indexOf(':') + 1));
+      if (authservId === null || !ids.includes(authservId)) continue;
     } else {
       if (seen.has(key)) continue;
       seen.add(key);
@@ -242,7 +249,11 @@ export async function scan(raw: RawMessage, options: ScanOptions = {}): Promise<
 export function scanParsed(email: Email, options: ScanOptions = {}): ScanResult {
   const headerText = email.headerLines.map((header) => header.line).join('\n');
   const authBlock = extractAuthHeaderBlock(trustedAuthHeaders(email.headerLines, options.authserv));
-  const auth = options.auth ?? (authBlock ? parseAuthenticationHeaders(authBlock) : null);
+  // Null when nothing survived — "no verdict to trust" — not an all-unknown
+  // verdict that would read as though a server had been asked.
+  const trustedResults = trustedAuthResults(authBlock, { authserv: options.authserv });
+  const auth =
+    options.auth ?? (trustedResults.length > 0 ? authStatusFromResults(trustedResults) : null);
   const lookup = headerLookupFromText(headerText);
   const received = headerValuesFromText(headerText, 'received');
   const from = mailboxes(email.from)[0];
